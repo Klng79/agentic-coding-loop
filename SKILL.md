@@ -180,7 +180,9 @@ Find files, symbols, tests, and conventions relevant to the plan. Use `grep_sear
 **Define the action space** — explicitly classify files into three categories:
 - **Editable:** files you will modify
 - **Read-only:** files you need for context but won't touch
-- **Off-limits:** files that must not be modified (test infrastructure, CI config, safety tooling, unrelated modules)
+- **Off-limits:** files that must not be modified (CI config, safety tooling, unrelated modules)
+
+**Escape hatch:** If the task *explicitly* targets test infrastructure (e.g., "fix the broken fixtures", "refactor conftest"), those files move from Off-limits to Editable. Declare this in the action space output and note it in the plan.
 
 Output:
 ```
@@ -250,7 +252,7 @@ If the review finds issues, either:
 - Attempts so far: 0 → max **3**
 - Diagnose the root cause from structured verify output (don't patch symptoms)
 - Make the smallest fix that addresses the cause
-- **Sandbox rules:** Repair must never modify test files, CI config, or safety tooling. If the fix requires changing these, stop with status `OUT_OF_SCOPE`.
+- **Sandbox rules:** Repair must never modify CI config or safety tooling. If the fix requires changing files outside the action space (unless those files were promoted via the escape hatch at Search), stop with status `OUT_OF_SCOPE`.
 - Re-run Verify
 - If 3 attempts all fail → jump to Summarize with status `BLOCKED`
 
@@ -261,7 +263,15 @@ git checkout -- . && git clean -fd && git apply $SNAP_DIR/attempt-<best>.patch
 If no attempt improved over baseline, rollback to clean: `git checkout -- . && git clean -fd`.
 
 ### 7. Summarize
-Final report. Use this exact format:
+Final report. Stop early and jump here if any stopping condition is met:
+
+- **DONE** — verify passes AND review finds no critical issues
+- **BLOCKED** — same failure 3× in a row, OR missing credentials/data, OR repair requires out-of-scope changes
+- **OUT_OF_SCOPE** — next repair would touch unrelated files or off-limits files (unless the task explicitly targets them — see Search step)
+- **UNSAFE** — required action is destructive (force-push, dropping tables, `rm -rf`, etc.) OR reward hacking detected — escalate to user, do not execute
+- **TIMEOUT** — time budget exceeded (if set by user)
+
+Use this exact format:
 
 ```
 ## Summary
@@ -303,33 +313,13 @@ Final report. Use this exact format:
 rm -rf $SNAP_DIR
 ```
 
-## Progress Tracking
-
-Maintain the progress log (defined in Verify) after every Verify call. The log enables:
-- **Delta tracking:** see if each repair actually improves the score
-- **Regression detection:** if score drops, rollback via State Management (`git apply $SNAP_DIR/attempt-<best>.patch`)
-- **Reward hacking detection:** if score improves but diff is suspicious, flag it
-
-## Stopping Rules
-
-Stop early and summarize with the matching status if:
-
-- **DONE** — verify passes AND review finds no critical issues
-- **BLOCKED** — same failure 3× in a row, OR missing credentials/data, OR repair requires out-of-scope changes
-- **OUT_OF_SCOPE** — next repair would touch unrelated files or off-limits files (test infrastructure, CI config, safety tooling)
-- **UNSAFE** — required action is destructive (force-push, dropping tables, `rm -rf`, etc.) OR reward hacking detected — escalate to user, do not execute
-- **TIMEOUT** — time budget exceeded (if set by user)
-
 ## Anti-Patterns
 
 - **Thrashing** — cycling between two failure modes → narrow the diff, ask the user
 - **Overfitting to tests** — tests pass but user-visible behavior is wrong → re-read the task, verify with a different angle (browser check, manual test, different test)
 - **Context drift** — plan no longer matches the code → re-run Search, update the plan
 - **Speculative rewrites** — large multi-file changes without a small-step verify path → split the work, run the loop on each piece
-- **Reward hacking** — agent finds unintended ways to maximize score without fulfilling the true objective (e.g., disabling tests, crashing the scorer, weakening assertions) → flag and stop with status `UNSAFE`
-- **Evaluator drift** — the verify command itself degrades over iterations (tests get weaker, assertions get broader) → compare current verify output to baseline, flag if verify is easier now
 - **Endless polishing** — continuing to revise after verify passes and review is clean → stop, ship it
-- **Sandbox bypass** — repair attempts to disable safety flags or modify test infrastructure "for efficiency" → stop with status `UNSAFE`
 
 ## Examples
 
