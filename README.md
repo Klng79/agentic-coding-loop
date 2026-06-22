@@ -4,7 +4,7 @@
     <strong>Stop shipping broken code. Start looping until it's right.</strong>
   </p>
   <p align="center">
-    <a href="#installation"><img src="https://img.shields.io/badge/Qwen_Code-skill-blue?style=flat-square" alt="Qwen Code Skill" /></a>
+    <a href="#compatibility"><img src="https://img.shields.io/badge/AI_Agent-Universal-blue?style=flat-square" alt="AI Agent Universal" /></a>
     <a href="https://github.com/Klng79/agentic-coding-loop-/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-green?style=flat-square" alt="License" /></a>
     <a href="https://github.com/Klng79/agentic-coding-loop-/stargazers"><img src="https://img.shields.io/github/stars/Klng79/agentic-coding-loop-?style=flat-square" alt="Stars" /></a>
   </p>
@@ -223,12 +223,25 @@ Status: BLOCKED (best state preserved at 6/8)
 
 ## Requirements
 
-- **[Qwen Code](https://github.com/anthropics/qwen-code)** — runs as a slash command skill
+- **Any AI coding agent** — works with Qwen Code, Claude Code, Cursor, Cline, Aider, or any tool that can read and follow structured skill documents
 - **Git** — snapshotting and rollback via `git diff` patches
+
+## Compatibility
+
+The skill is defined as a structured `SKILL.md` document that any AI coding agent can read and follow. While originally developed for Qwen Code, it works with any agent that supports:
+
+- Reading markdown skill/instruction files
+- Running shell commands (`git`, your verify command)
+- File editing with surgical precision
+- Tool-based workflows (if available)
+
+**Tested with:** Qwen Code, Claude Code, Cursor, Cline
+
+**Should work with:** Aider, Copilot, Windsurf, and other agentic coding tools
 
 ## Contributing
 
-Issues and PRs welcome. This skill is designed to be forked and customized — the `SKILL.md` file is the single source of truth that Qwen Code reads.
+Issues and PRs welcome. This skill is designed to be forked and customized — the `SKILL.md` file is the single source of truth that your AI agent reads.
 
 ## License
 
