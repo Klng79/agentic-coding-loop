@@ -25,10 +25,11 @@ Run these in parallel to find candidates:
 | Signal | Command |
 |---|---|
 | Uncommitted changes | `git status --porcelain` and `git diff --stat HEAD` |
-| Open TODOs / FIXMEs | `grep -rn 'TODO\|FIXME\|XXX' --include='*.py' --include='*.js' --include='*.ts' .` (limit 5) |
-| Failing tests | run the detected verify command (Inputs §2) and surface failures |
+| Open TODOs / FIXMEs | `grep_search` for `TODO\|FIXME\|XXX` in source files (limit 5) |
 | Recent commits | `git log -n 3 --oneline` |
 | Project roadmap | grep README/PRD for "Next steps", "Roadmap", "TODO" sections |
+
+> **Note:** Failing tests are surfaced later in Baseline (Step 0), after the verify command has been selected. This avoids a circular dependency where task suggestion would require the verify command that hasn't been chosen yet.
 
 Present 2–4 task options, e.g.:
 
@@ -100,13 +101,51 @@ If the user overrides, respect it — but log the override in the Summarize repo
 
 **Re-plan trigger:** At any point during Search (Step 2), if the agent discovers the plan from Step 1 is wrong or incomplete, return to Step 1 with the new context. **Max 1 re-plan.** If the second plan is also invalidated by Search, escalate to Strategic scope and recommend `/grill-with-docs`.
 
+### State Management
+
+Rollback is real, not aspirational. Use `git diff` patches saved to a temp directory:
+
+```
+SNAP_DIR=$(mktemp -d /tmp/acl-snapshots-XXXXXX)
+```
+
+**Snapshot operations:**
+| Action | Command |
+|--------|---------|
+| Save current state | `git diff > $SNAP_DIR/<label>.patch` |
+| Rollback to a snapshot | `git checkout -- . && git clean -fd && git apply $SNAP_DIR/<label>.patch` |
+| Rollback to clean | `git checkout -- . && git clean -fd` (no apply — returns to pre-loop state) |
+| Cleanup | `rm -rf $SNAP_DIR` (in Summarize) |
+
+**When to snapshot:**
+- After Baseline: save as `baseline.patch` (pre-edit state)
+- After each Verify run: save as `attempt-N.patch` **only if the score improved over the previous best** — regressions are not saved
+- Before each Repair: current state is already captured by the previous snapshot
+
+**Best-known-good:** The attempt with the highest score. If repair #N scores lower than a previous attempt, rollback to the better patch before applying the next fix. Track in the progress log:
+```
+| Attempt | Score | Delta | Patch file       | Notes |
+|---------|-------|-------|------------------|-------|
+| 0       | 3/10  | —     | baseline.patch   | reference |
+| 1       | 5/10  | +2    | attempt-1.patch  | fixed import |
+| 2       | 4/10  | -1    | (not saved)      | regression → rollback to attempt-1.patch |
+```
+
 ### 0. Baseline
 Run the verify command **before any edits**. Record:
 - Exit code
 - Output (test count, error count, coverage %, or other measurable signal)
 - Timestamp
 
+**Take the baseline snapshot:**
+```bash
+SNAP_DIR=$(mktemp -d /tmp/acl-snapshots-XXXXXX)
+git diff > $SNAP_DIR/baseline.patch
+```
+
 This is your reference point. All subsequent repairs must improve relative to this baseline. If baseline already passes, note it and proceed to Plan with a "green field" status.
+
+> **Note for users:** If Baseline shows failing tests, consider adding "fix the N failing tests" as a task candidate — this is where failing-test signals surface (after verify command is selected, not during task auto-detection).
 
 **Output:**
 ```
@@ -154,7 +193,10 @@ Output:
 ### 3. Modify
 Make the smallest coherent set of edits. One diff per logical change. Use `edit` for surgical changes, `write_file` only for new files. Match existing style — do not "improve" adjacent code.
 
-**Checkpoint:** If this is a repair iteration and the previous repair made things worse, rollback to the best-known-good state before applying the new fix.
+**Checkpoint (repair iterations only):** If the previous repair's score was lower than an earlier attempt's, rollback before applying the new fix:
+```bash
+git checkout -- . && git clean -fd && git apply $SNAP_DIR/attempt-<best>.patch
+```
 
 ### 4. Verify
 Run the user-supplied command via `run_shell_command`. Capture stdout, stderr, exit code.
@@ -180,11 +222,16 @@ If reward hacking is detected, flag it and stop with status `UNSAFE`.
 **Track progress:**
 ```
 ## Progress Log
-| Attempt | Result | Score | Delta | Notes |
-|---------|--------|-------|-------|-------|
-| Baseline | FAIL | 3/10 | — | reference |
-| 1 | FAIL | 5/10 | +2 | fixed import error |
-| 2 | PASS | 10/10 | +7 | all tests passing |
+| Attempt | Result | Score | Delta | Patch file      | Notes |
+|---------|--------|-------|-------|-----------------|-------|
+| 0       | FAIL   | 3/10  | —     | baseline.patch  | reference |
+| 1       | FAIL   | 5/10  | +2    | attempt-1.patch | fixed import error |
+| 2       | PASS   | 10/10 | +7    | attempt-2.patch | all tests passing |
+```
+
+**After each Verify run** (pass or fail), save a snapshot if the score improved over the previous best:
+```bash
+git diff > $SNAP_DIR/attempt-<N>.patch
 ```
 
 ### 5. Review (only on Verify Pass)
@@ -207,7 +254,11 @@ If the review finds issues, either:
 - Re-run Verify
 - If 3 attempts all fail → jump to Summarize with status `BLOCKED`
 
-**Solution archive:** Keep the best-known-good state (the attempt with the highest score, even if it didn't fully pass). If repair #3 makes things worse than repair #1, rollback to repair #1's state before summarizing.
+**Solution archive (operational):** After each repair attempt, the Verify step saves a snapshot if the score improved. Before summarizing (especially on BLOCKED), rollback to the best-known-good patch:
+```bash
+git checkout -- . && git clean -fd && git apply $SNAP_DIR/attempt-<best>.patch
+```
+If no attempt improved over baseline, rollback to clean: `git checkout -- . && git clean -fd`.
 
 ### 7. Summarize
 Final report. Use this exact format:
@@ -226,11 +277,14 @@ Final report. Use this exact format:
 - **Status:** PASS | FAIL
 
 ### Progress
-| Attempt | Result | Score | Delta | Notes |
-|---------|--------|-------|-------|-------|
-| Baseline | <status> | <score> | — | reference |
-| 1 | <status> | <score> | <delta> | <notes> |
-| ... | ... | ... | ... | ... |
+| Attempt | Result | Score | Delta | Patch file      | Notes |
+|---------|--------|-------|-------|-----------------|-------|
+| 0       | <status> | <score> | —   | baseline.patch  | reference |
+| 1       | <status> | <score> | <delta> | attempt-1.patch | <notes> |
+| ...     | ...    | ...   | ...   | ...             | ... |
+
+### State
+- **Final patch applied:** <yes — attempt-N.patch | no — rolled back to baseline | partial — attempt-K.patch (best score)>
 
 ### Changes
 - `<file>`: <one-line description>
@@ -244,14 +298,17 @@ Final report. Use this exact format:
 - <anything that passed verify but is still uncertain>
 ```
 
+**Cleanup:** Remove the snapshot directory:
+```bash
+rm -rf $SNAP_DIR
+```
+
 ## Progress Tracking
 
-Maintain a running log of all verify attempts. This enables:
+Maintain the progress log (defined in Verify) after every Verify call. The log enables:
 - **Delta tracking:** see if each repair actually improves the score
-- **Regression detection:** if score drops, rollback to best-known-good
+- **Regression detection:** if score drops, rollback via State Management (`git apply $SNAP_DIR/attempt-<best>.patch`)
 - **Reward hacking detection:** if score improves but diff is suspicious, flag it
-
-Update the progress log after every Verify call.
 
 ## Stopping Rules
 
@@ -310,6 +367,22 @@ User: *"Refactor the auth system from sessions to JWT with refresh tokens."*
 
 1. **Scope Gate:** Spans auth middleware, session store, token management, database schema, all protected routes, frontend token handling → **Strategic**.
 2. **STOP.** Recommend: "This is a multi-concern architectural change. Run `/grill-with-docs` to nail down token strategy (JWT vs opaque, refresh rotation, revocation), then `/to-issues` to break it into vertical slices. Come back to `/agentic-coding-loop` for each slice."
+
+### BLOCKED with rollback
+
+User: *"Fix the failing integration tests in `tests/integration/`. Verify with `pytest tests/integration/`."*
+
+1. **Scope Gate:** Single directory, clear verify → **Tactical**.
+2. **Baseline:** `pytest tests/integration/` — 4/8 passing. Score: 4/8. Save `baseline.patch`.
+3. **Plan → Search → Modify:** fix test imports and DB connection string.
+4. **Verify attempt 1:** 6/8 passing. Score: 6/8. Delta: +2. Save `attempt-1.patch`.
+5. **Repair attempt 1:** fix remaining 2 tests — change a shared fixture in `conftest.py`.
+6. **Verify attempt 2:** 5/8 passing. Score: 5/8. Delta: -1. **Regression.**
+   - `conftest.py` is off-limits (test infrastructure). Score dropped because the fixture change broke other tests.
+7. **Rollback:** `git checkout -- . && git apply $SNAP_DIR/attempt-1.patch` (restores attempt-1 state: 6/8).
+8. **Repair attempt 2:** fix remaining 2 tests without touching fixtures. Fails — root cause requires fixture changes.
+9. **Repair attempt 3:** same failure. 3/3 exhausted.
+10. **Summarize:** status BLOCKED. Final state: `attempt-1.patch` applied (6/8). Remaining 2 tests need fixture refactor (off-limits). Recommend `/grill-with-docs` or manual intervention.
 
 ## References
 
