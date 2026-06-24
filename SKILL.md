@@ -101,6 +101,26 @@ If the user overrides, respect it — but log the override in the Summarize repo
 
 **Re-plan trigger:** At any point during Search (Step 2), if the agent discovers the plan from Step 1 is wrong or incomplete, return to Step 1 with the new context. **Max 1 re-plan.** If the second plan is also invalidated by Search, escalate to Strategic scope and recommend `/grill-with-docs`.
 
+### Loop Pattern (after Scope Gate, before Baseline)
+
+Detect the dominant feedback signal from the verify command and task description. The loop pattern shapes how Verify parses output and how Repair diagnoses — the 8 steps stay the same, but the *observation lens* changes.
+
+| Verify command | Task signal | Loop pattern | Observation lens |
+|---|---|---|---|
+| Test runner (`pytest`, `npm test`, `go test`) | Bug fix, feature, regression | **Test-Driven** | Pass/fail counts, assertion failures, tracebacks. Repair must confirm the test fails for the *right reason* before fixing. |
+| Type checker (`tsc --noEmit`, `cargo check`, `mypy`) | Migration, dependency upgrade, refactor | **Compiler-Driven** | Type errors, missing fields, incompatible signatures. Structural correctness only — does not prove product correctness. |
+| Runtime command (`npm run dev`, `python app.py`, `curl` script) | Runtime bug, integration issue | **Runtime Debugging** | Logs, stack traces, HTTP responses, exit codes. Repair forms a hypothesis → targeted change → observe → update hypothesis. |
+| User provides PR review comments | Post-PR fix, address review feedback | **Review-Driven** | Comment text. Categorize each comment as bug, product question, style preference, or out-of-scope. Treat comments as requirements, not blind suggestions. |
+| Browser/preview check (`playwright`, `cypress`, manual preview) | UI/frontend task, layout, accessibility | **Product Iteration** | Screenshots, DOM state, console errors, viewport behavior. Compare against design constraints, responsive checks, accessibility. |
+
+If the verify command spans multiple categories (e.g., `npm run build && npm test`), pick the pattern matching the **primary task signal** — the task description determines which observation lens matters most.
+
+State the detected pattern in the Baseline output:
+```
+## Loop Pattern: <pattern name>
+**Observation lens:** <one-line description>
+```
+
 ### State Management
 
 Rollback is real, not aspirational. Use `git diff` patches saved to a temp directory:
@@ -112,7 +132,7 @@ SNAP_DIR=$(mktemp -d /tmp/acl-snapshots-XXXXXX)
 **Snapshot operations:**
 | Action | Command |
 |--------|---------|
-| Save current state | `git diff > $SNAP_DIR/<label>.patch` |
+| Save current state | `git add -A && git diff --cached > $SNAP_DIR/<label>.patch && git reset -q` |
 | Rollback to a snapshot | `git checkout -- . && git clean -fd && git apply $SNAP_DIR/<label>.patch` |
 | Rollback to clean | `git checkout -- . && git clean -fd` (no apply — returns to pre-loop state) |
 | Cleanup | `rm -rf $SNAP_DIR` (in Summarize) |
@@ -142,8 +162,10 @@ Run the verify command **before any edits**. Record:
 **Take the baseline snapshot:**
 ```bash
 SNAP_DIR=$(mktemp -d /tmp/acl-snapshots-XXXXXX)
-git diff > $SNAP_DIR/baseline.patch
+git add -A && git diff --cached > $SNAP_DIR/baseline.patch && git reset -q
 ```
+
+> `git add -A` stages all changes including new files, `git diff --cached` captures the full diff, then `git reset -q` restores the index without touching the working tree. Plain `git diff` misses untracked files, which would break rollback for any new file the agent creates.
 
 This is your reference point. All subsequent repairs must improve relative to this baseline. If baseline already passes, note it and proceed to Plan with a "green field" status.
 
@@ -152,6 +174,7 @@ This is your reference point. All subsequent repairs must improve relative to th
 **Output:**
 ```
 ## Baseline
+**Loop pattern:** <pattern name>
 **Verify command:** `<command>`
 **Exit code:** <code>
 **Score:** <metric> (e.g., "3/10 tests passing", "0 errors", "85% coverage")
@@ -197,7 +220,7 @@ Output:
 ```
 
 ### 3. Modify
-Make the smallest coherent set of edits. One diff per logical change. Use `edit` for surgical changes, `write_file` only for new files. Match existing style — do not "improve" adjacent code.
+Make the smallest coherent set of edits. One diff per logical change. Use `edit` for surgical changes, `write_file` only for new files. Match existing style — do not "improve" adjacent code. Reuse shared components, follow naming conventions, and avoid introducing new abstractions discovered during Search.
 
 **Checkpoint (repair iterations only):** If the previous repair's score was lower than an earlier attempt's, rollback before applying the new fix:
 ```bash
@@ -249,7 +272,7 @@ If reward hacking is detected, flag it and stop with status `UNSAFE`.
 
 **After each Verify run** (pass or fail), save a snapshot if the score improved over the previous best:
 ```bash
-git diff > $SNAP_DIR/attempt-<N>.patch
+git add -A && git diff --cached > $SNAP_DIR/attempt-<N>.patch && git reset -q
 ```
 
 ### 5. Review (only on Verify Pass)
@@ -282,11 +305,33 @@ If the review finds issues, either:
 
 ### 6. Repair (only on Verify Fail)
 - Attempts so far: 0 → max **3**
+- **Context refresh:** If verify output reveals files or modules not covered by the original Search, re-run targeted `grep_search`/`read_file` on those areas before attempting repair. Context is perishable — refresh after meaningful observations.
 - Diagnose the root cause from structured verify output (don't patch symptoms)
 - Make the smallest fix that addresses the cause
 - **Sandbox rules:** Repair must never modify CI config or safety tooling. If the fix requires changing files outside the action space (unless those files were promoted via the escape hatch at Search), stop with status `OUT_OF_SCOPE`.
 - Re-run Verify
-- If 3 attempts all fail → jump to Summarize with status `BLOCKED`
+
+**Human checkpoint after attempt 2 fails:**
+Before burning attempt 3, pause and consult the user. Use `ask_user_question` with a summary of what was tried and the agent's root cause analysis:
+
+```
+Repair attempts so far:
+  Attempt 1: <what was tried> → <score, what failed>
+  Attempt 2: <what was tried> → <score, what failed>
+
+Root cause assessment: <agent's diagnosis>
+
+Best-known-good state: attempt-<N>.patch (<score>)
+```
+
+Offer these options:
+- "Try a different approach — <custom instructions from user>"
+- "Stop here — I'll take over manually" (→ Summarize as BLOCKED)
+- "One more attempt — you have a specific fix in mind" (→ proceed to attempt 3)
+
+If the user provides a new approach, apply it as attempt 3. If the user says stop, jump to Summarize with status `BLOCKED`. If the user gives a specific fix, proceed with attempt 3 using their guidance.
+
+- If 3 attempts all fail (including any user-guided attempt 3) → jump to Summarize with status `BLOCKED`
 
 **Solution archive (operational):** After each repair attempt, the Verify step saves a snapshot if the score improved. Before summarizing (especially on BLOCKED), rollback to the best-known-good patch:
 ```bash
@@ -298,7 +343,7 @@ If no attempt improved over baseline, rollback to clean: `git checkout -- . && g
 Final report. Stop early and jump here if any stopping condition is met:
 
 - **DONE** — verify passes AND review finds no critical issues
-- **BLOCKED** — same failure 3× in a row, OR missing credentials/data, OR repair requires out-of-scope changes
+- **BLOCKED** — same failure 3× in a row, OR user stopped at human checkpoint, OR missing credentials/data, OR repair requires out-of-scope changes
 - **OUT_OF_SCOPE** — next repair would touch unrelated files or off-limits files (unless the task explicitly targets them — see Search step)
 - **UNSAFE** — required action is destructive (force-push, dropping tables, `rm -rf`, etc.) OR reward hacking detected — escalate to user, do not execute
 - **TIMEOUT** — time budget exceeded (if set by user)
@@ -347,11 +392,12 @@ rm -rf $SNAP_DIR
 
 ## Anti-Patterns
 
-- **Thrashing** — cycling between two failure modes → narrow the diff, ask the user
+- **Thrashing** — cycling between two failure modes → narrow the diff, trigger the human checkpoint early (before attempt 3)
 - **Overfitting to tests** — tests pass but user-visible behavior is wrong → re-read the task, verify with a different angle (browser check, manual test, different test)
 - **Context drift** — plan no longer matches the code → re-run Search, update the plan
 - **Speculative rewrites** — large multi-file changes without a small-step verify path → split the work, run the loop on each piece
 - **Endless polishing** — continuing to revise after verify passes and review is clean → stop, ship it
+- **Unsafe autonomy** — agent runs destructive commands, rewrites unrelated files, or pushes without review → enforce action space boundaries, require human approval for off-limits file modifications, use UNSAFE status to escalate
 
 ## Examples
 
@@ -401,10 +447,13 @@ User: *"Fix the failing integration tests in `tests/integration/`. Verify with `
 5. **Repair attempt 1:** fix remaining 2 tests — change a shared fixture in `conftest.py`.
 6. **Verify attempt 2:** 5/8 passing. Score: 5/8. Delta: -1. **Regression.**
    - `conftest.py` is off-limits (test infrastructure). Score dropped because the fixture change broke other tests.
-7. **Rollback:** `git checkout -- . && git apply $SNAP_DIR/attempt-1.patch` (restores attempt-1 state: 6/8).
-8. **Repair attempt 2:** fix remaining 2 tests without touching fixtures. Fails — root cause requires fixture changes.
-9. **Repair attempt 3:** same failure. 3/3 exhausted.
-10. **Summarize:** status BLOCKED. Final state: `attempt-1.patch` applied (6/8). Remaining 2 tests need fixture refactor (off-limits). Recommend `/grill-with-docs` or manual intervention.
+7. **Rollback:** `git checkout -- . && git clean -fd && git apply $SNAP_DIR/attempt-1.patch` (restores attempt-1 state: 6/8).
+8. **Human checkpoint:** Attempt 2 failed. Present summary to user:
+   - Attempt 1: fixed imports → 6/8 (+2)
+   - Attempt 2: fixture change regressed to 5/8 → rolled back to 6/8
+   - Root cause: remaining 2 tests need fixture refactor, but `conftest.py` is off-limits
+   - User chooses "Stop here" → BLOCKED
+9. **Summarize:** status BLOCKED. Final state: `attempt-1.patch` applied (6/8). Remaining 2 tests need fixture refactor (off-limits). Recommend `/grill-with-docs` or manual intervention.
 
 ## References
 

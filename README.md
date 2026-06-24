@@ -29,6 +29,7 @@ One command. The skill handles everything:
 | Step | What happens |
 |------|-------------|
 | **Scope Gate** | Classifies your task as Tactical, Medium, or Strategic — and escalates before wasting your time |
+| **Loop Pattern** | Detects feedback signal type (Test-Driven, Compiler-Driven, Runtime Debugging, Review-Driven, Product Iteration) and adapts the observation lens |
 | **Baseline** | Runs your verify command *before* touching a single line, establishing a known-good reference |
 | **Plan** | Decomposes the task into concrete, ordered steps you can review |
 | **Search** | Maps the codebase — what's editable, what's read-only, what's off-limits |
@@ -81,6 +82,20 @@ If detected → stops with `UNSAFE` and escalates to you.
 
 No more watching an agent barrel into a 15-file refactor it wasn't equipped to handle.
 
+### 🔁 Loop Pattern Detection
+
+Not all tasks use the same feedback signal. The skill detects the dominant loop pattern from your verify command and task description, then adapts how it observes and diagnoses:
+
+| Pattern | When it applies | Observation lens |
+|---------|----------------|-----------------|
+| **Test-Driven** | Bug fix, feature, regression | Pass/fail counts, assertion failures, tracebacks |
+| **Compiler-Driven** | Migration, dependency upgrade, refactor | Type errors, missing fields, incompatible signatures |
+| **Runtime Debugging** | Runtime bug, integration issue | Logs, stack traces, HTTP responses — hypothesis → change → observe |
+| **Review-Driven** | Post-PR fix, address review comments | Comment text categorized as bug, style, product question, or out-of-scope |
+| **Product Iteration** | UI/frontend task, layout, accessibility | Screenshots, DOM state, console errors, viewport behavior |
+
+The 8 steps stay the same — the *observation lens* changes.
+
 ### 🧪 Anti-Pattern Guards
 
 The skill actively detects and handles:
@@ -90,6 +105,7 @@ The skill actively detects and handles:
 - **Context drift** — plan no longer matches the code
 - **Speculative rewrites** — large changes without a verify path
 - **Endless polishing** — revising after verify already passes
+- **Unsafe autonomy** — destructive commands, unrelated rewrites, or unreviewed pushes
 
 ## Installation
 
@@ -130,6 +146,11 @@ The skill auto-detects your project's verify command from `package.json`, `pypro
 ┌─────────────────────────────────────────────────────┐
 │  Scope Gate                                         │
 │  Tactical → proceed  │  Medium → confirm  │  Stop  │
+└──────────────────────┬──────────────────────────────┘
+                       ▼
+┌─────────────────────────────────────────────────────┐
+│  Loop Pattern                                        │
+│  Test-Driven · Compiler · Runtime · Review · Product │
 └──────────────────────┬──────────────────────────────┘
                        ▼
   ┌─────────────────────────────────────────────────┐
