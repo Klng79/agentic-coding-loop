@@ -1,6 +1,6 @@
 ---
 name: agentic-coding-loop
-description: Run a structured 8-step agentic coding loop (Baseline → Plan → Search → Modify → Verify → Review → Repair → Summarize) on a task in the current project, with scope classification (tactical/medium/strategic), plan confirmation, re-plan on search invalidation, baseline tracking, quantitative progress monitoring, reward hacking detection, and up to 3 auto-repair attempts. Use when the user asks to "run the agentic loop", "loop engineer this", wants plan→act→verify→repair on a coding task, or invokes this skill directly.
+description: Run a structured 8-step agentic coding loop (Baseline → Plan → Search → Modify → Verify → Review → Repair → Summarize) on a task in the current project, with scope classification (tactical/medium/strategic), plan confirmation, re-plan on search invalidation, baseline tracking, quantitative progress monitoring, reward hacking detection, and up to 3 auto-repair attempts. Supports two execution modes: subagent mode (delegates Search/Modify/Verify/Review to subagents for context protection — Qwen Code) and inline mode (all steps in main agent context — universal). Use when the user asks to "run the agentic loop", "loop engineer this", wants plan→act→verify→repair on a coding task, or invokes this skill directly.
 ---
 
 # Agentic Coding Loop
@@ -11,12 +11,13 @@ Incorporates patterns from frontier autonomous coding systems: baseline-first ex
 
 ## Inputs (auto-suggest, then ask)
 
-Before starting, use `ask_user_question` to get three things from the user. Auto-detect candidates, present them as options, and let the user pick one or type their own — the tool always provides an **"Other"** option for custom input.
+Before starting, use `ask_user_question` to get four things from the user. Auto-detect candidates, present them as options, and let the user pick one or type their own — the tool always provides an **"Other"** option for custom input.
 
 **Skip rules:**
 - If the user already specified the task in their slash command (e.g. `/agentic-coding-loop add a /health endpoint`), skip the task question and go straight to verify.
 - If both task and verify are already in the slash command, skip to the timeout question.
-- If all three are already specified, skip the Inputs section entirely.
+- If all four are already specified, skip the Inputs section entirely.
+- Execution mode (Input 4) is never skipped silently — always ask if subagent capability is detected, since the user may prefer inline mode even on Qwen Code.
 
 ### 1. Task — auto-suggest candidates, then ask
 
@@ -77,6 +78,23 @@ Ask if the user wants to set a time limit for the entire loop. Present options:
 - "1 hour"
 
 If a timeout is set, track elapsed time and check at each Verify checkpoint. If exceeded, summarize with status `TIMEOUT`.
+
+### 4. Execution mode — auto-detect, then ask
+
+Detect whether the `agent` tool (subagent spawning) is available in the current environment. This determines whether steps can delegate to subagents.
+
+**Auto-detect:**
+- If running in Qwen Code (which provides the `agent` tool), default to **Subagent mode**.
+- If running in an agent that does not support subagent spawning (Claude Code without subagents, Cursor, Cline, Aider, etc.), silently use **Inline mode** — do not ask.
+
+**Ask (only if subagent capability is detected):**
+
+- "Subagent mode (recommended) — delegates Search, Modify, Verify, and Review to subagents, protecting main agent context for state tracking and decisions"
+- "Inline mode — all steps run in main agent context (agent-agnostic, works on any tool)"
+
+Store the choice as `MODE` (value: `subagent` or `inline`) for use throughout the loop.
+
+> **Portability note:** Inline mode is the universal fallback. The skill works identically on any agent in inline mode — subagent mode is an optimization for Qwen Code that protects the main agent's context window.
 
 ## The Loop
 
@@ -153,6 +171,125 @@ SNAP_DIR=$(mktemp -d /tmp/acl-snapshots-XXXXXX)
 | 2       | 4/10  | -1    | (not saved)      | regression → rollback to attempt-1.patch |
 ```
 
+**Context broker (subagent mode):** In subagent mode, the main agent is the sole keeper of loop state. Subagents are stateless — each spawn starts with zero context. The main agent must pass forward the relevant summaries between steps:
+- Search Results → Modify briefing (action space, patterns, blockers)
+- Modify Results → Review briefing (changed files)
+- Verify Results → Repair diagnosis (errors, score, reward hacking flags)
+- Review Findings → Summarize (remaining risks, review notes)
+
+The main agent should store these summaries in its conversation context or `todo_write` — never assume a subagent remembers anything from a previous spawn.
+
+### Subagent Protocols (Subagent Mode Only)
+
+When execution mode is **Subagent**, four steps delegate to subagents. Each subagent starts with zero context — the main agent must pass a complete briefing and receive a structured markdown return. The main agent acts as **context broker**: it holds summaries from each return and passes them forward (Search summary → Modify briefing, Modify results → Review briefing, Verify results → Repair diagnosis).
+
+#### Search Protocol (`Explore` subagent)
+
+**Briefing template:**
+```
+Task: <one-line task description>
+Project root: <absolute path>
+Plan steps: <numbered plan from Step 1>
+Find: files, symbols, tests, and conventions relevant to this plan. Identify:
+- Existing patterns the change must respect (naming, structure, framework conventions)
+- Tests that cover the area
+- Files that should NOT be touched (CI config, safety tooling, unrelated modules)
+- Any blockers that would prevent the plan from succeeding
+Thoroughness: medium
+```
+
+**Return format:**
+```markdown
+## Search Results
+**Relevant files:** (file path — why it matters)
+**Patterns & conventions:** (naming, structure, framework patterns to follow)
+**Tests covering area:** (file paths, or "none found")
+**Action space:**
+- **Editable:** (list)
+- **Read-only:** (list)
+- **Off-limits:** (list)
+**Blockers:** (anything that would prevent the plan from succeeding, or "none")
+```
+
+Main agent uses: validates plan against action space + blockers → triggers re-plan if blockers invalidate plan.
+
+#### Modify Protocol (`general-purpose` subagent)
+
+> **Pre-condition:** Main agent takes a git snapshot **before** spawning this subagent.
+
+**Briefing template:**
+```
+Task: <one-line task description>
+Project root: <absolute path>
+Plan steps: <numbered plan from Step 1>
+Search summary: <paste Search Results from Step 2>
+Specific edits to make: <concrete instructions per plan step>
+Project conventions: <from Search Results — patterns & conventions>
+Files to create: <list, if any; otherwise "none">
+Constraints: Use edit for surgical changes, write_file only for new files. Match existing style. No drive-by refactors. Do not touch off-limits files.
+```
+
+**Return format:**
+```markdown
+## Modify Results
+**Files changed:** (file — one-line description of change)
+**Edits applied:** (numbered list, one per logical change)
+**Issues encountered:** (anything unexpected — missing imports, broken patterns, or "none")
+**Files created:** (new files, or "none")
+```
+
+Main agent uses: nothing further — proceeds to Verify (Verify will catch issues).
+
+#### Verify Protocol (`general-purpose` subagent)
+
+**Briefing template:**
+```
+Verify command: <the command to run>
+Scoring formula: <from Loop Pattern detection, e.g. "passed / total", "1 / (1 + error_count)", "binary 0/1">
+Loop pattern: <detected pattern name>
+What to parse: <what signals matter for this loop pattern, e.g. "pass/fail counts, assertion failures, tracebacks" for Test-Driven>
+Run the verify command via run_shell_command. Parse stdout + stderr into structured feedback.
+```
+
+**Return format:**
+```markdown
+## Verify Results
+**Exit code:** (number)
+**Status:** PASS | FAIL
+**Score:** (metric, e.g. "7/10 tests passing", "0 errors", "85% coverage")
+**Errors:** (file:line — message, one per line; or "none")
+**Test results:** (pass/fail/skip counts, if applicable; or "N/A")
+**Warnings:** (non-fatal issues, or "none")
+**Reward hacking flags:** (list any concerns — diffs outside action space, weakened verify, modified test/CI files; or "none")
+```
+
+Main agent uses: structured feedback to decide Review (pass) or Repair (fail), track progress log, save snapshot if score improved, check reward hacking flags → UNSAFE if detected.
+
+#### Review Protocol (`code-reviewer` subagent)
+
+**Briefing template:**
+```
+Task: <one-line task description>
+Project root: <absolute path>
+Changed files: <from Modify Results — files changed list>
+Action space: <from Search Results — editable/read-only/off-limits>
+Verify status: <PASS/FAIL and score from Verify Results>
+Review the diff for: Correctness (does it solve the task or just pass tests? edge cases?), Security (secrets, injection, open endpoints?), Performance (debug artifacts, algorithmic regressions?), Coverage parity (new feature → matching test? reduced coverage?), Minimalism (focused diff or unrelated changes?).
+```
+
+**Return format:**
+```markdown
+## Review Findings
+**Correctness:** (assessment + any issues, or "no issues")
+**Security:** (assessment + any issues, or "no issues")
+**Performance:** (assessment + any issues, or "no issues")
+**Coverage parity:** (assessment + any issues, or "no issues")
+**Minimalism:** (assessment + any issues, or "no issues")
+**Severity summary:** critical | warning | clean
+```
+
+Main agent uses: decides fix-now + re-verify (loop back to Modify + Verify subagents), flag-as-remaining-risk in Summarize, or OUT_OF_SCOPE if issues need significant additional work.
+
 ### 0. Baseline
 Run the verify command **before any edits**. Record:
 - Exit code
@@ -199,7 +336,10 @@ If the user requests revisions, update the plan and confirm once more. Max 1 rev
 Use `todo_write` to track the plan as actionable steps the user can see.
 
 ### 2. Search
-Find files, symbols, tests, and conventions relevant to the plan. Use `grep_search`, `glob`, `read_file`. Note:
+
+**If MODE = subagent:** Spawn an `Explore` subagent using the Search Protocol briefing (see Subagent Protocols → Search). Wait for the structured return. Use the returned action space and blockers to validate the plan. If blockers invalidate the plan → trigger re-plan (Step 1, max 1 re-plan). Store the Search Results for passing to Modify.
+
+**If MODE = inline:** Use `grep_search`, `glob`, `read_file` to find files, symbols, tests, and conventions relevant to the plan. Note:
 - Existing patterns the change must respect
 - Tests that cover the area
 - Files that should NOT be touched
@@ -211,7 +351,7 @@ Find files, symbols, tests, and conventions relevant to the plan. Use `grep_sear
 
 **Escape hatch:** If the task *explicitly* targets test infrastructure (e.g., "fix the broken fixtures", "refactor conftest"), those files move from Off-limits to Editable. Declare this in the action space output and note it in the plan.
 
-Output:
+Output (inline mode):
 ```
 ## Action Space
 **Editable:** <list>
@@ -220,7 +360,10 @@ Output:
 ```
 
 ### 3. Modify
-Make the smallest coherent set of edits. One diff per logical change. Use `edit` for surgical changes, `write_file` only for new files. Match existing style — do not "improve" adjacent code. Reuse shared components, follow naming conventions, and avoid introducing new abstractions discovered during Search.
+
+**If MODE = subagent:** Take a git snapshot (`git add -A && git diff --cached > $SNAP_DIR/pre-modify.patch && git reset -q`). Spawn a `general-purpose` subagent using the Modify Protocol briefing (see Subagent Protocols → Modify), passing the Search Results from Step 2. Wait for the structured return. Proceed to Verify — do not inspect the diff yourself (Verify will catch issues).
+
+**If MODE = inline:** Make the smallest coherent set of edits. One diff per logical change. Use `edit` for surgical changes, `write_file` only for new files. Match existing style — do not "improve" adjacent code. Reuse shared components, follow naming conventions, and avoid introducing new abstractions discovered during Search.
 
 **Checkpoint (repair iterations only):** If the previous repair's score was lower than an earlier attempt's, rollback before applying the new fix:
 ```bash
@@ -228,7 +371,10 @@ git checkout -- . && git clean -fd && git apply $SNAP_DIR/attempt-<best>.patch
 ```
 
 ### 4. Verify
-Run the user-supplied command via `run_shell_command`. Capture stdout, stderr, exit code.
+
+**If MODE = subagent:** Spawn a `general-purpose` subagent using the Verify Protocol briefing (see Subagent Protocols → Verify), passing the verify command, scoring formula, and loop pattern. Wait for the structured return (## Verify Results). Use the returned status, score, errors, and reward hacking flags to decide next step. Save a snapshot if score improved. If reward hacking flags are present → stop with `UNSAFE`.
+
+**If MODE = inline:** Run the user-supplied command via `run_shell_command`. Capture stdout, stderr, exit code.
 
 **Parse the output into structured feedback:**
 - **Errors:** list of error messages with file:line references
@@ -276,7 +422,13 @@ git add -A && git diff --cached > $SNAP_DIR/attempt-<N>.patch && git reset -q
 ```
 
 ### 5. Review (only on Verify Pass)
-Self-critique the solution. Re-read the diff and run through each rubric:
+
+**If MODE = subagent:** Spawn a `code-reviewer` subagent using the Review Protocol briefing (see Subagent Protocols → Review), passing the changed files (from Modify Results), action space (from Search Results), and verify status. Wait for the structured return (## Review Findings). Based on severity summary:
+- **clean** → proceed to Summarize (DONE)
+- **warning** → flag in Summarize as "Remaining risks", or fix small issues by looping back to Modify + Verify subagents
+- **critical** → stop with `OUT_OF_SCOPE` if issues need significant work, or fix and re-verify
+
+**If MODE = inline:** Self-critique the solution. Re-read the diff and run through each rubric:
 
 **Correctness:**
 - Does the solution actually solve the task, or just make tests pass?
@@ -305,11 +457,12 @@ If the review finds issues, either:
 
 ### 6. Repair (only on Verify Fail)
 - Attempts so far: 0 → max **3**
-- **Context refresh:** If verify output reveals files or modules not covered by the original Search, re-run targeted `grep_search`/`read_file` on those areas before attempting repair. Context is perishable — refresh after meaningful observations.
-- Diagnose the root cause from structured verify output (don't patch symptoms)
-- Make the smallest fix that addresses the cause
+- **Context refresh:** If verify output reveals files or modules not covered by the original Search, re-run targeted search. In subagent mode: spawn a new `Explore` subagent scoped to the newly-revealed areas. In inline mode: use `grep_search`/`read_file`. Context is perishable — refresh after meaningful observations.
+- Diagnose the root cause from structured verify output (don't patch symptoms). This diagnosis stays with the main agent in both modes.
+- **Apply fix:**
+  - **Subagent mode:** Rollback to best-known-good patch if previous score regressed. Spawn a `general-purpose` subagent using the Modify Protocol briefing with the fix instructions. Then spawn a Verify subagent. Main agent checks the Verify return.
+  - **Inline mode:** Make the smallest fix that addresses the cause using `edit`/`write_file`. Re-run Verify directly.
 - **Sandbox rules:** Repair must never modify CI config or safety tooling. If the fix requires changing files outside the action space (unless those files were promoted via the escape hatch at Search), stop with status `OUT_OF_SCOPE`.
-- Re-run Verify
 
 **Human checkpoint after attempt 2 fails:**
 Before burning attempt 3, pause and consult the user. Use `ask_user_question` with a summary of what was tried and the agent's root cause analysis:
@@ -378,7 +531,7 @@ Use this exact format:
 - ...
 
 ### Review notes
-- <self-critique observations>
+- <review observations from Review step — self-critique in inline mode, code-reviewer findings in subagent mode>
 - <edge cases or risks identified>
 
 ### Remaining risks
@@ -400,6 +553,22 @@ rm -rf $SNAP_DIR
 - **Unsafe autonomy** — agent runs destructive commands, rewrites unrelated files, or pushes without review → enforce action space boundaries, require human approval for off-limits file modifications, use UNSAFE status to escalate
 
 ## Examples
+
+### Subagent mode flow (applies to any example below)
+
+When MODE = subagent, steps 2–5 delegate to subagents. Here's how the Tactical example looks in subagent mode:
+
+1. **Scope Gate:** same — main agent classifies.
+2. **Baseline:** same — main agent runs verify command directly.
+3. **Plan:** same — main agent decomposes and confirms with user (Medium scope).
+4. **Search:** main agent spawns `Explore` subagent → receives Search Results (action space, patterns, blockers).
+5. **Modify:** main agent takes snapshot, spawns `general-purpose` subagent with Search Results → receives Modify Results (files changed, edits applied).
+6. **Verify:** main agent spawns `general-purpose` subagent with verify command → receives Verify Results (PASS/FAIL, score, errors, reward hacking flags).
+7. **Repair:** main agent diagnoses root cause from Verify Results, spawns `general-purpose` subagent with fix instructions → spawns Verify subagent → checks result.
+8. **Review:** main agent spawns `code-reviewer` subagent → receives Review Findings (severity: clean/warning/critical).
+9. **Summarize:** same — main agent owns the report.
+
+Main agent context stays clean: it holds only the structured summaries, not raw search results, diffs, or test output.
 
 ### Tactical (single file, clear fix)
 

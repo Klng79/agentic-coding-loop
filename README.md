@@ -5,6 +5,7 @@
   </p>
   <p align="center">
     <a href="#compatibility"><img src="https://img.shields.io/badge/AI_Agent-Universal-blue?style=flat-square" alt="AI Agent Universal" /></a>
+    <a href="#execution-modes"><img src="https://img.shields.io/badge/Subagent_Mode-Qwen_Code-purple?style=flat-square" alt="Subagent Mode Qwen Code" /></a>
     <a href="https://github.com/Klng79/agentic-coding-loop/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-green?style=flat-square" alt="License" /></a>
     <a href="https://github.com/Klng79/agentic-coding-loop/stargazers"><img src="https://img.shields.io/github/stars/Klng79/agentic-coding-loop?style=flat-square" alt="Stars" /></a>
   </p>
@@ -247,6 +248,27 @@ Status: BLOCKED (best state preserved at 6/8)
 - **Any AI coding agent** — works with Qwen Code, Claude Code, Cursor, Cline, Aider, or any tool that can read and follow structured skill documents
 - **Git** — snapshotting and rollback via `git diff` patches
 
+## Execution Modes
+
+The skill supports two execution modes, selected at startup:
+
+### Subagent Mode (Qwen Code)
+
+Delegates Search, Modify, Verify, and Review steps to specialized subagents (`Explore`, `general-purpose`, `code-reviewer`), while the main agent stays focused on loop control, state management, and decisions. This protects the main agent's context window from large search results, diffs, and test output.
+
+| Step | Subagent Type | What it offloads |
+|------|---------------|-----------------|
+| **Search** | `Explore` | grep/glob/read results → concise action space summary |
+| **Modify** | `general-purpose` | Edit application → files changed summary |
+| **Verify** | `general-purpose` | Test/build output → structured PASS/FAIL + score |
+| **Review** | `code-reviewer` | Diff review → findings by rubric + severity |
+
+The main agent acts as **context broker** — it passes structured summaries between subagents and holds all loop state (snapshots, progress log, decisions).
+
+### Inline Mode (Universal)
+
+All steps run in the main agent context. Works with any AI coding agent — no subagent spawning capability required. This is the default fallback for agents that don't support subagents.
+
 ## Compatibility
 
 The skill is defined as a structured `SKILL.md` document that any AI coding agent can read and follow. While originally developed for Qwen Code, it works with any agent that supports:
@@ -256,9 +278,11 @@ The skill is defined as a structured `SKILL.md` document that any AI coding agen
 - File editing with surgical precision
 - Tool-based workflows (if available)
 
-**Tested with:** Qwen Code, Claude Code, Cursor, Cline
+**Subagent mode** (delegates Search/Modify/Verify/Review to subagents) is available on Qwen Code. **Inline mode** (all steps in main agent context) works everywhere.
 
-**Should work with:** Aider, Copilot, Windsurf, and other agentic coding tools
+**Tested with:** Qwen Code (both modes), Claude Code, Cursor, Cline
+
+**Should work with:** Aider, Copilot, Windsurf, and other agentic coding tools (inline mode)
 
 ## Contributing
 
